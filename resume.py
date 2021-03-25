@@ -1,6 +1,7 @@
 import re
 import textwrap
 import sys
+import PySimpleGUI as sg
 
 # check version
 if sys.version_info[0] < 3:
@@ -103,7 +104,7 @@ def debug_print(l):
 #     "hotend_temp": hotend_temp,
 #     "z_hop": False|True,
 # }
-def parse(gcode, z_val, filament_code_cutoff = ""):
+def parse(gcode, z_val, filament_code_cutoff = "", max_neighbors = 3):
 
     extrusion_mode = "absolute"
     z_move_regex = re.compile(" *G1[^;]*Z([0-9]+(?:\\.[0-9]+)).*")
@@ -140,9 +141,11 @@ def parse(gcode, z_val, filament_code_cutoff = ""):
     # end loop
 
 
-    # Now go through the list backwards to remove z hops and find 2 closest zs
+    # Now go through the list backwards to remove z hops and find closest z and its 5 neighbors
     lowest_z = None
-    closest_z = [None, None]
+    closest_z = None
+    front_neighbors = [None] * max_neighbors
+    back_neighbors = []
     for index in reversed(range(len(z_moves))):
         current_z = z_moves[index]["coordinates"]
         # if new low z re-set low z
@@ -155,48 +158,44 @@ def parse(gcode, z_val, filament_code_cutoff = ""):
 
         # save values for convenience
 
-        closest_z_coords = None if closest_z[0] == None else closest_z[0]["coordinates"]
-        second_closest_z_coords = None if closest_z[1] == None else closest_z[1]["coordinates"]
+        closest_z_coords = None if closest_z == None else closest_z["coordinates"]
 
-        # this is not a z_hop, compare it to closest zs
+        # this is not a z_hop, compare it to closest z
         # no value stored, store one
         if closest_z_coords == None:
-            closest_z[0] = z_moves[index]
+            closest_z = z_moves[index]
+            # reset back neighbors
+            back_neighbors = []
 
-        # if current difference is less than stored difference, move
+        # if current difference is less than stored difference, swap
         elif abs(current_z - z_val) < abs(closest_z_coords - z_val):
-            # first make the closest be the second closest
-            closest_z[1] = closest_z[0]
-            # save current as closest
-            closest_z[0] = z_moves[index]
+            # shift neighbors
+            for neighbor in range(len(front_neighbors) - 1, 0, -1):
+                front_neighbors[neighbor] = front_neighbors[neighbor - 1]
+            front_neighbors[0] = closest_z
 
-        # shouldn't happen, but better to cover our bases
-        elif second_closest_z_coords == None:
-            closest_z[1] = z_moves[index]
+            # save current as closest
+            closest_z = z_moves[index]
+
+            # reset back neighbors
+            back_neighbors = []
 
         # if it's equal, replace, since we want the first one in the file
         elif current_z == closest_z_coords:
-            closest_z[0] = z_moves[index]
+            closest_z = z_moves[index]
 
-        # replace the second closest if it's the same. See the next case
-        # to understand when this might come up
-        elif current_z == second_closest_z_coords:
-            closest_z[1] = z_moves[index]
+        # current coordinates are in back_neighbors. Swap it out
+        elif back_neighbors and z_moves[index]["coordinates"] == back_neighbors[-1]["coordinates"]:
+            back_neighbors[-1] = z_moves[index]
 
-        # not closest, but better than second closest.
-        # This can happen when current z passes z_val,
-        # and it's not closer than the value above z_val.
-        # for example:
-        # z_val = 40.8
-        # G1 Z40.0
-        # <- z_val goes here
-        # G1 Z41.0
-        # when it reaches Z=40, z_val is closer to 41, but 40 is second best
-        elif abs(current_z - z_val) < abs(second_closest_z_coords - z_val):
-            closest_z[1] = z_moves[index]
+        # this z is worse than others found and is not a z hop. We probably passed the best value.
+        # fill back neighbors
+        elif len(back_neighbors) < max_neighbors:
+            back_neighbors.append(z_moves[index])
+
     # end loop
 
-    return closest_z
+    return back_neighbors, closest_z, front_neighbors
 
 def write_resume_gcode(gcode, z_choice, output_file):
     output = [ write_intro(
@@ -209,25 +208,121 @@ def write_resume_gcode(gcode, z_choice, output_file):
 
     write_output("\n".join(output), output_file)
 
+# TODO: Singleton window and uptade it
+def box_window_simple_question(question):
+    layout = [  [sg.Text(question)],
+                [sg.Input()],
+                [sg.Submit()] ]
+
+    window = sg.Window('3D Resumer', layout, size=(500,300))
+
+    event, values = window.read()
+
+    if event == sg.WIN_CLOSED:
+        sys.exit()
+
+    window.close()
+
+    return values[0]
+
+def box_window_question_with_file_browse(question):
+    layout = [  [sg.Text(question)],
+                [sg.Input(key="input")],
+                [sg.FileBrowse(key="FileBrowse", enable_events=True)],
+                [sg.Submit()] ]
+
+    window = sg.Window('3D Resumer', layout, size=(700,300))
+
+    while True:
+        event, values = window.read()
+
+        if event == sg.WIN_CLOSED:
+            sys.exit()
+        elif event == "Submit":
+            window.close()
+            return values["input"]
+        elif event == "FileBrowse":
+            window["input"].update(values["FileBrowse"])
+
+
+def box_window_question_with_buttons(question, *buttons):
+    layout = [  [sg.Text(question)], [] ]
+
+    for i in buttons:
+        layout[1].append(i)
+
+    window = sg.Window('3D Resumer', layout, size=(500,300))
+
+    event, values = window.read()
+
+    if event == sg.WIN_CLOSED:
+        sys.exit()
+
+    window.close()
+
+    return event
+
+def box_window_question_file_save(question):
+    layout = [  [sg.Text(question)],
+                [sg.Input(key="input")],
+                [sg.FileSaveAs(key="FileBrowse", enable_events=True)],
+                [sg.Submit()] ]
+
+    window = sg.Window('3D Resumer', layout, size=(700,300))
+
+    while True:
+        event, values = window.read()
+
+        if event == sg.WIN_CLOSED:
+            sys.exit()
+        elif event == "Submit":
+            window.close()
+            return values["input"]
+        elif event == "FileBrowse":
+            window["input"].update(values["FileBrowse"])
+
+def box_window_with_message(message):
+    layout = [  [sg.Text(message)],
+                [sg.OK()] ]
+
+    window = sg.Window('3D Resumer', layout)
+
+    event, values = window.read()
+
+    if event == sg.WIN_CLOSED:
+        sys.exit()
+
+    window.close()
+
 
 # TODO: add exec options
-# TODO: add gui
 
-gcode = readlines(input("file: "))
-z_val = float(input("measured z: "))
-closest_z = parse(gcode, z_val)
+gcode = readlines(box_window_question_with_file_browse("gcode file"))
+z_val = float(box_window_simple_question("measured z"))
+back_neighbors, closest_z, front_neighbors = parse(gcode, z_val)
 
-z_choice = int(input("choose z:\n 0: {}\n 1: {}\nchoice: "
-                     .format(str(closest_z[0]["coordinates"]), str(closest_z[1]["coordinates"]))))
+buttons = [sg.Button(str(back_neighbors[-i-1]["coordinates"]), key=i) for i in range(len(back_neighbors))]
+buttons += [sg.Button(str(closest_z["coordinates"]), key=len(back_neighbors), button_color=("white", "black"))]
+buttons += [sg.Button(str(front_neighbors[i]["coordinates"]), key=i + 1 + len(back_neighbors)) for i in range(len(front_neighbors))]
 
-if (z_choice != 0 and z_choice != 1):
-    print("Invalid selection")
-    exit()
 
-output_file = input("output file: ")
+selection = box_window_question_with_buttons("select best z choice", *buttons)
 
-print("cutting gcode in position {}".format(closest_z[z_choice]))
+z_choice = (back_neighbors + [closest_z] + front_neighbors)[selection]
 
-write_resume_gcode(gcode, closest_z[z_choice], output_file)
+output_file = box_window_question_file_save("output file")
 
-print("resume gcode written to {}".format(output_file))
+write_resume_gcode(gcode, z_choice, output_file)
+
+box_window_with_message("resume gcode written to {}".format(output_file))
+
+#z_choice = int(input("choose z:\n 0: {}\n 1: {}\nchoice: "
+#                     .format(str(closest_z[0]["coordinates"]), str(closest_z[1]["coordinates"]))))
+
+#if (z_choice != 0 and z_choice != 1):
+#    print("Invalid selection")
+#    exit()
+
+
+#print("cutting gcode in position {}".format(closest_z[z_choice]))
+
